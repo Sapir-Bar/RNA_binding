@@ -8,10 +8,9 @@ def load_data(
     protein_embed_pt: str,
     rna_embed_pt: str,
     affinity_txt: str,
-    protein_seq_txt: str,
     *,
-    train_seq_out: Optional[str] = None,      # optional path to save train indices
-    test_seq_out: Optional[str]  = None,      # optional path to save test indices
+    train_indices: Optional[str] = None,      # optional path to save train indices
+    test_indices: Optional[str]  = None,      # optional path to save test indices
     dtype: torch.dtype = torch.float32,
     device: Union[str, torch.device] = "cpu",
     test_size: float = 0.2,
@@ -35,10 +34,13 @@ def load_data(
 
     # 2) RNA
     rna_obj = torch.load(rna_embed_pt, map_location="cpu")
-    D_np = np.asarray(rna_obj, dtype=np.float32)                  # shape (N, ddim)
+    if isinstance(rna_obj, torch.Tensor):
+        D_np = rna_obj.cpu().numpy().astype(np.float32)           # shape (N, ddim)
+    else:
+        D_np = np.asarray(rna_obj, dtype=np.float32)              # shape (N, ddim)
 
     # 3) affinity Y (N × M)
-    Y_np = np.loadtxt(affinity_txt, dtype=np.float32, delimiter="")
+    Y_np = np.loadtxt(affinity_txt, dtype=np.float32, delimiter="\t")
     N, M = Y_np.shape
 
     # 4) consistency checks
@@ -83,13 +85,13 @@ def load_data(
     Y_test  = Y.index_select(1, test_idx_dev)
 
     # 9) save train/test indices to text files
-    if train_seq_out is not None:
-        with open(train_seq_out, "w") as f:
+    if train_indices is not None:
+        with open(train_indices, "w") as f:
             for idx in train_idx_cpu:
                 f.write(f"{idx}\n")
-                
-    if test_seq_out is not None:
-        with open(test_seq_out, "w") as f:
+
+    if test_indices is not None:
+        with open(test_indices, "w") as f:
             for idx in test_idx_cpu:
                 f.write(f"{idx}\n")
 

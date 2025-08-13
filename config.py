@@ -7,3 +7,6 @@ train_rna_embedding = "data/embedding/RNA/rnabert_embeddings.pt"
 test_seqs = "data/experimental/test_seqs.txt"
 test_rbps = "data/experimental/test_RBPs.txt"
 test_rbps_embedding = "data/embedding/RBPs/embeddings_test.pt"
+
+train_indices = "data/experimental/train_indices.txt"
+test_indices = "data/experimental/test_indices.txt"
