@@ -22,8 +22,7 @@ class RBPSimilarityModel(nn.Module):
         hidden_protein_dim: int = 128,  # L in the paper
         hidden_rna_dim: int = 64,       # K in the paper
         merge_type: str = "concat",     # Type of merge operation
-        l2_reg: float = 1e-4,          # λ regularization coefficient
-        reconstruction_method: str = "weighted_sum"  # "weighted_sum" or "pseudoinverse"  #?
+      
     ):
         """
         Args:
@@ -32,8 +31,6 @@ class RBPSimilarityModel(nn.Module):
             hidden_protein_dim: Hidden dimension for protein subnet (L)
             hidden_rna_dim: Hidden dimension for RNA subnet (K)
             merge_type: How to merge h_P and h_E ("concat", "hadamard", "sum", "bilinear")
-            l2_reg: L2 regularization coefficient
-            reconstruction_method: Method to reconstruct binding intensities
         """
         super().__init__()
         
@@ -42,9 +39,7 @@ class RBPSimilarityModel(nn.Module):
         self.hidden_protein_dim = hidden_protein_dim
         self.hidden_rna_dim = hidden_rna_dim
         self.merge_type = merge_type
-        self.l2_reg = l2_reg
-        self.reconstruction_method = reconstruction_method
-        
+  
         # Protein subnet: h_P = σ(W_P^T * P_{j,:} + b_P)
         self.protein_net = nn.Linear(protein_dim, hidden_protein_dim)
         
@@ -78,7 +73,7 @@ class RBPSimilarityModel(nn.Module):
         # Store training data for reconstruction (will be set during training)
         self.register_buffer('Y_train', None)
         
-    def forward_similarity(self, P_batch: Tensor, E_batch: Tensor) -> Tensor:
+    def forward(self, P_batch: Tensor, E_batch: Tensor) -> Tensor:
         """
         Forward pass to predict similarity values.
         
@@ -166,45 +161,7 @@ class RBPSimilarityModel(nn.Module):
             raise ValueError(f"Unknown reconstruction_method: {self.reconstruction_method}")
             
         return binding_intensities
-    
-    def set_training_data(self, Y_train: Tensor):
-        """Set the training binding intensity matrix for reconstruction."""
-        self.register_buffer('Y_train', Y_train)
-    
-    def compute_loss(self, P: Tensor, E: Tensor, Y: Tensor) -> Tensor:
-        """
-        Compute the regularized loss for similarity prediction.
-        
-        Args:
-            P: Protein features, shape (M, protein_dim)
-            E: RNA features E = Y^T D, shape (M, rna_dim)  
-            Y: Binding intensity matrix, shape (N, M)
-            
-        Returns:
-            Total loss (similarity loss + regularization)
-        """
-        M = P.shape[0]
-        
-        # Compute target similarities: Y^T Y (cosine similarities)
-        Y_T = Y.transpose(0, 1)  # (M, N)
-        target_similarities = torch.matmul(Y_T, Y)  # (M, M)
-        
-        # Predict similarities for all pairs
-        pred_similarities = self.forward_pairs(P, E)  # (M, M)
-        
-        # Similarity prediction loss (MSE)
-        similarity_loss = F.mse_loss(pred_similarities, target_similarities)
-        
-        # L2 regularization
-        reg_loss = 0.0
-        for param in self.parameters():
-            reg_loss += torch.sum(param ** 2)
-        reg_loss *= self.l2_reg
-        
-        total_loss = similarity_loss + reg_loss
-        
-        return total_loss
-    
+
     def predict_for_test_rbp(self, p_test: Tensor, P_train: Tensor, E_train: Tensor) -> Tensor:
         """
         Predict binding intensities for a test RBP.
@@ -233,27 +190,6 @@ class RBPSimilarityModel(nn.Module):
         binding_intensities = self.reconstruct_binding_intensities(similarities)
         
         return binding_intensities
-    
-    def get_regularization_params(self):
-        """Get all parameters for regularization."""
-        params = {
-            'w_M': None,
-            'b_M': None, 
-            'W_P': self.protein_net.weight,
-            'b_P': self.protein_net.bias,
-            'W_E': self.rna_net.weight,
-            'b_E': self.rna_net.bias
-        }
-        
-        if self.final_net is not None:
-            params['w_M'] = self.final_net.weight
-            params['b_M'] = self.final_net.bias
-        elif self.bilinear is not None:
-            params['w_M'] = self.bilinear.weight
-            params['b_M'] = self.bilinear.bias
-            
-        return params
-
 
 def create_model(
     protein_dim: int,
@@ -261,8 +197,6 @@ def create_model(
     hidden_protein_dim: int = 128,
     hidden_rna_dim: int = 64,
     merge_type: str = "concat",
-    l2_reg: float = 1e-4,
-    reconstruction_method: str = "weighted_sum"
 ) -> RBPSimilarityModel:
     """
     Factory function to create RBPSimilarityModel.
@@ -273,8 +207,6 @@ def create_model(
         hidden_protein_dim: Hidden dimension for protein subnet (L in paper)
         hidden_rna_dim: Hidden dimension for RNA subnet (K in paper)  
         merge_type: Merge operation ("concat", "hadamard", "sum", "bilinear")
-        l2_reg: L2 regularization coefficient
-        reconstruction_method: Reconstruction method ("weighted_sum" or "pseudoinverse")
         
     Returns:
         Initialized model
@@ -285,6 +217,4 @@ def create_model(
         hidden_protein_dim=hidden_protein_dim,
         hidden_rna_dim=hidden_rna_dim,
         merge_type=merge_type,
-        l2_reg=l2_reg,
-        reconstruction_method=reconstruction_method
     )

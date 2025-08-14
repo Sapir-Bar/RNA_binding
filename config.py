@@ -10,3 +10,15 @@ test_rbps_embedding = "data/embedding/RBPs/embeddings_test.pt"
 
 train_indices = "data/experimental/train_indices.txt"
 test_indices = "data/experimental/test_indices.txt"
+model_path = "models/rbp_similarity_model.pth"
+
+# Training configuration
+test_size = 0.2
+random_state = 42
+normalize_Y = True
+num_epochs = 5
+batch_size = 128
+l2_coefficient = 1e-4 
+learning_rate = 1e-4
+
+# bash command: CUDA_DEVICE_VISIBLE=0 python affinity_regression/main.py

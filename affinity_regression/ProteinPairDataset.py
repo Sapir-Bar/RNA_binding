@@ -1,4 +1,5 @@
 import torch
+import wandb
 from typing import Dict, Iterator, Optional, Tuple, Callable
 
 Tensor = torch.Tensor
@@ -160,6 +161,7 @@ class ProteinPairTrainer:
         grad_accum_steps: int = 1,
         log_every: int = 0,
         clip_grad_norm: Optional[float] = None,  # optional gradient clipping
+        l2_coefficient: float = 0.0,
     ):
         self.model = model
         self.optimizer = optimizer
@@ -168,12 +170,14 @@ class ProteinPairTrainer:
         self.grad_accum_steps = max(1, int(grad_accum_steps))
         self.log_every = int(log_every)
         self.clip_grad_norm = clip_grad_norm
+        self.l2_coefficient = l2_coefficient
 
     def train_one_epoch(self, loader) -> float:
 
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
-        total_loss, num_batches = 0.0, 0
+        total_loss, total_sum_sq, total_sym_loss, total_l2 = 0.0, 0.0, 0.0, 0.0
+        num_batches = 0
 
         for step, batch in enumerate(loader):
             p_left,  e_right = batch["p_left"],  batch["e_right"]
@@ -186,7 +190,10 @@ class ProteinPairTrainer:
             if pred_ij.ndim > 1: pred_ij = pred_ij.squeeze(-1)
             if pred_ji.ndim > 1: pred_ji = pred_ji.squeeze(-1)
 
-            loss = self.loss_fn(pred_ij, pred_ji, s) / self.grad_accum_steps
+            data_loss, sum_sq, sym_loss = self.loss_fn(pred_ij, pred_ji, s)
+            l2_term = self._l2_penalty()
+
+            loss = (data_loss + l2_term) / self.grad_accum_steps
             loss.backward()
 
             if (step + 1) % self.grad_accum_steps == 0:
@@ -196,10 +203,19 @@ class ProteinPairTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
 
             total_loss += loss.item() * self.grad_accum_steps
+            total_sum_sq += sum_sq.item()
+            total_sym_loss += sym_loss.item()
+            total_l2       += l2_term.item()
             num_batches += 1
 
-            if self.log_every and (step % self.log_every == 0):
-                print(f"[train] step={step} loss={loss.item() * self.grad_accum_steps:.4f}") # convert to wandb print
+        # Epoch-level logging (averaged per batch)
+        denom = max(1, num_batches)
+        wandb.log({
+            "train/epoch_total_loss": total_loss / denom,
+            "train/epoch_sum_sq":     total_sum_sq / denom,
+            "train/epoch_sym_loss":   total_sym_loss / denom,
+            "train/epoch_l2":         total_l2 / denom,
+        })
 
         return total_loss / max(1, num_batches)
 
@@ -234,3 +250,110 @@ class ProteinPairTrainer:
         avg_loss = total_loss / max(1, num_batches)
         avg_metric = (metric_accum / metric_count) if metric_count > 0 else None
         return avg_loss, avg_metric
+    
+    @staticmethod
+    def custom_loss_function(pred_ij: Tensor, pred_ji: Tensor, s: Tensor) -> Tensor:
+        # TO DO: add l2-regularization and coefficients
+        # Sum of squared Euclidean differences
+        sum_squared_diff = torch.sum((pred_ij - s) ** 2)
+        # Symmetry constraint (optional)
+        symmetry_loss = 0.1 * torch.sum((pred_ij - pred_ji) ** 2)
+
+        return sum_squared_diff + symmetry_loss, sum_squared_diff, symmetry_loss
+    
+    def _l2_penalty(self) -> Tensor:
+        """Compute ∑||θ||² over all trainable parameters, scaled by l2_coefficient."""
+        if self.l2_coefficient == 0.0:
+            # Return a zero Tensor on the correct device to keep autograd happy
+            return next(self.model.parameters()).new_tensor(0.0)
+        l2 = None
+        for p in self.model.parameters():
+            if p.requires_grad:
+                term = p.pow(2).sum()
+                l2 = term if l2 is None else (l2 + term)
+        return self.l2_coefficient * l2
+    
+    @torch.no_grad()
+    def inference(
+        self,
+        model,
+        P_test: Tensor,      # [T, d_p]   test proteins
+        E_train: Tensor,     # [M, d_e]   train RNA features per RBP (Y^t x D)
+        Y_train: Tensor,     # [N, M]     binding intensities (rows=RNA probes, cols=RBPs) for train RBPs
+        Y_test: Tensor,      # [T, N]     ground-truth intensities for test proteins
+        chunk_size: int = None,   # optional: chunk over T to reduce memory
+        eps: float = 1e-8,
+        device: torch.device = None,
+    ):
+        """
+        Returns:
+        y_pred:        [T, N]  reconstructed intensities per test protein
+        s_hat:         [T, M]  similarity of each test protein vs all train RBPs
+        pearson:       [T]     Pearson correlation per test protein
+        pearson_mean:  float   mean Pearson across all test proteins
+        """
+        model.eval()
+        if device is None:
+            try:
+                device = next(model.parameters()).device
+            except StopIteration:
+                device = torch.device("cpu")
+
+        P_test  = P_test.to(device)
+        E_train = E_train.to(device)
+        Y_train = Y_train.to(device)
+        Y_test  = Y_test.to(device)
+
+        T, M = P_test.shape[0], E_train.shape[0]
+
+        # -------- 1) Compute ŝ \in R^{T x M} (similarity of each test protein to each train RBP) --------
+        if chunk_size is None:
+            # Fully vectorized: Cartesian product of (P_test, E_train)
+            P_rep = P_test.repeat_interleave(M, dim=0)   # [T*M, d_p]
+            E_rep = E_train.repeat(T, 1)                 # [T*M, d_e]
+            s = model(P_rep, E_rep)                      # [T*M] or [T*M,1]
+            if s.ndim > 1:
+                s = s.squeeze(-1)
+            s_hat = s.view(T, M)                         # [T, M]
+        else:
+            # Chunked along the T dimension to save memory
+            s_chunks = []
+            for start in range(0, T, chunk_size):
+                end = min(start + chunk_size, T)
+                Pt = P_test[start:end]                   # [t, d_p]
+                t = Pt.shape[0]
+                P_rep = Pt.repeat_interleave(M, dim=0)   # [t*M, d_p]
+                E_rep = E_train.repeat(t, 1)             # [t*M, d_e]
+                s = model(P_rep, E_rep)
+                if s.ndim > 1:
+                    s = s.squeeze(-1)
+                s_chunks.append(s.view(t, M))
+            s_hat = torch.cat(s_chunks, dim=0)           # [T, M]
+        
+        # Apply softmax normalization so each row sums to 1
+        s_hat = torch.softmax(s_hat, dim=1)              # [T, M] with each row summing to 1
+
+        # -------- 2) Reconstruct intensities: ŷ = Y · ŝ --------
+        # Y_train: [N, M], s_hat^T: [M, T] -> product is [N, T], then transpose to [T, N]
+        y_pred = (Y_train @ s_hat.T).T                   # [T, N]
+
+        # -------- 3) Pearson correlation per test protein --------
+        X = y_pred.T  # predictions
+        Y = Y_test    # ground truth
+
+        # Center each column
+        Xc = X - X.mean(dim=0, keepdim=True)   # [P, M]
+        Yc = Y - Y.mean(dim=0, keepdim=True)   # [P, M]
+
+        # covariance numerator and L2 norms per column
+        cov = (Xc * Yc).sum(dim=0)             # [M]
+        X_norm = torch.sqrt((Xc * Xc).sum(dim=0))  # [M]
+        Y_norm = torch.sqrt((Yc * Yc).sum(dim=0))  # [M]
+
+        denom = X_norm * Y_norm                 # [M]
+
+        # Pearson per column; add eps to avoid divide-by-zero
+        r_per_col = cov / (denom + eps)         # [M]
+        r_mean = r_per_col.mean()
+
+        return y_pred, s_hat, r_per_col, r_mean
