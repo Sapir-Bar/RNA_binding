@@ -273,6 +273,8 @@ class ProteinPairTrainer:
                 l2 = term if l2 is None else (l2 + term)
         return self.l2_coefficient * l2
     
+
+
     @torch.no_grad()
     def inference(
         self,
@@ -284,6 +286,7 @@ class ProteinPairTrainer:
         chunk_size: int = None,   # optional: chunk over T to reduce memory
         eps: float = 1e-8,
         device: torch.device = None,
+        use_softmax: bool = False,  # Make softmax optional
     ):
         """
         Returns:
@@ -330,8 +333,9 @@ class ProteinPairTrainer:
                 s_chunks.append(s.view(t, M))
             s_hat = torch.cat(s_chunks, dim=0)           # [T, M]
         
-        # Apply softmax normalization so each row sums to 1
-        s_hat = torch.softmax(s_hat, dim=1)              # [T, M] with each row summing to 1
+        # Optional softmax normalization - try both ways
+        if use_softmax:
+            s_hat = torch.softmax(s_hat, dim=1)          # [T, M] with each row summing to 1
 
         # -------- 2) Reconstruct intensities: ŷ = Y · ŝ --------
         # Y_train: [N, M], s_hat^T: [M, T] -> product is [N, T], then transpose to [T, N]
